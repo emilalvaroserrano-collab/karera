@@ -1,9 +1,4 @@
 {
-  "installCommand": "npm install --omit=dev --no-audit --no-fund",
-  "buildCommand": "npm run build",
-  "framework": null
-}
-{
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "app": {
