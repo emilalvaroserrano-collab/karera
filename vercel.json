@@ -3,3 +3,34 @@
   "buildCommand": "npm run build",
   "framework": null
 }
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "app": {
+      "root": ".",
+      "framework": "tanstack-start"
+    },
+    "karera": {
+      "root": "karera",
+      "framework": "vite"
+    },
+    "server": {
+      "root": "karera/server",
+      "framework": "express"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "server"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "app"
+      }
+    }
+  ]
+}
