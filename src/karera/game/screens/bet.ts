@@ -1,0 +1,342 @@
+// Betting window: 8 horse cards, quick ₱10 / ₱20 taps, and a custom amount
+// that only reveals Confirm Bet when the load balance can cover it.
+import {
+  CURRENCY,
+  FONT_DIGI,
+  FONT_IMPACT,
+  FONT_MOTOR,
+  MAX_BET,
+  MIN_BET,
+  TRAPS,
+  fmtMoney,
+} from "../constants";
+import { Game, Screen } from "../engine";
+import { HORSE_A_FRAMES, THUMB_FRAME } from "../horseFrames";
+import { text } from "../ui";
+import { renderMsgDialog } from "./dialogs";
+import { MenuScreen } from "./menu";
+import { RaceScreen } from "./race";
+
+const QUICK = [10, 20];
+const LOCK_S = 60;
+
+type Card = { trap: number; x: number; y: number; w: number; h: number };
+
+function cards(): Card[] {
+  const out: Card[] = [];
+  for (let i = 0; i < 8; i++) {
+    const col = i < 4 ? 0 : 1;
+    const row = i % 4;
+    out.push({ trap: col === 0 ? row : row + 4, x: 28 + col * 612, y: 118 + row * 132, w: 592, h: 122 });
+  }
+  return out;
+}
+
+function el<T extends HTMLElement>(id: string): T | null {
+  return document.getElementById(id) as T | null;
+}
+
+export class BetScreen implements Screen {
+  private warn: string | null = null;
+  private selected = -1;
+  private lock = 0;
+  private locking = false;
+  private onConfirm: (() => void) | null = null;
+  private onAmount: (() => void) | null = null;
+
+  constructor(private game: Game) {
+    this.game.net.onState((s) => {
+      if (s.phase === "racing") this.game.show(new RaceScreen(this.game));
+    });
+  }
+
+  enter(): void {
+    this.game.sound.musicMode = "bet";
+    this.game.sound.soundtrack(true);
+    this.game.sound.announcer();
+    this.warn = null;
+    this.selected = -1;
+    this.lock = 0;
+    this.locking = false;
+    this.ensureBar();
+    el("bet-bar")?.classList.remove("hidden");
+    const amt = el<HTMLInputElement>("bet-amt");
+    if (amt) amt.value = "";
+    this.onAmount = () => this.refreshBar();
+    this.onConfirm = () => this.confirmCustom();
+    amt?.addEventListener("input", this.onAmount);
+    el("bet-confirm")?.addEventListener("click", this.onConfirm);
+    this.refreshBar();
+  }
+
+  exit(): void {
+    this.game.sound.soundtrack(false);
+    this.game.sound.stopAnnouncer();
+    el("bet-bar")?.classList.add("hidden");
+    if (this.onAmount) el("bet-amt")?.removeEventListener("input", this.onAmount);
+    if (this.onConfirm) el("bet-confirm")?.removeEventListener("click", this.onConfirm);
+    this.onAmount = null;
+    this.onConfirm = null;
+  }
+
+  /** 60s clock starts only with 2 backed horses or 2 different players. */
+  private fieldReady(): boolean {
+    const horses = new Set<number>();
+    const players = new Set<string>();
+    const me = this.game.state.phone;
+    if (this.game.state.bets.length > 0 && me) players.add(me);
+    for (const b of this.game.state.bets) {
+      horses.add(b.a);
+      if (b.b >= 0) horses.add(b.b);
+    }
+    for (const b of this.game.net.state?.bets ?? []) {
+      horses.add(b.a);
+      if (b.b >= 0) horses.add(b.b);
+      if (b.phone) players.add(b.phone);
+    }
+    return horses.size >= 2 || players.size >= 2;
+  }
+
+  update(dt: number): void {
+    if (!this.fieldReady()) {
+      this.locking = false;
+      this.lock = 0;
+      return;
+    }
+    if (!this.locking) {
+      this.locking = true;
+      this.lock = LOCK_S;
+    }
+    this.lock -= dt;
+    if (this.lock <= 0) this.game.show(new RaceScreen(this.game));
+  }
+
+  private ensureBar(): void {
+    if (el("bet-bar")) return;
+    const bar = document.createElement("div");
+    bar.id = "bet-bar";
+    bar.className = "betbar hidden";
+    bar.innerHTML = `
+      <div class="betbar-top">
+        <span id="bet-horse">Tap a horse</span>
+        <span id="bet-bal"></span>
+      </div>
+      <div class="betbar-row">
+        <input id="bet-amt" inputmode="decimal" placeholder="Custom amount" autocomplete="off" />
+        <button id="bet-confirm" type="button" class="hidden">CONFIRM BET</button>
+      </div>
+      <div id="bet-err" class="err"></div>`;
+    document.body.appendChild(bar);
+  }
+
+  private refreshBar(): void {
+    const g = this.game;
+    const horse = el("bet-horse");
+    const bal = el("bet-bal");
+    const err = el("bet-err");
+    const btn = el("bet-confirm");
+    const amtEl = el<HTMLInputElement>("bet-amt");
+    if (horse) horse.textContent = this.selected >= 0 ? TRAPS[this.selected].name : "Tap a horse";
+    if (bal) bal.textContent = `LOAD ${CURRENCY}${g.state.money.toFixed(2)}`;
+    const raw = amtEl?.value.trim() ?? "";
+    const amt = Number(raw);
+    const ok =
+      this.selected >= 0 &&
+      raw !== "" &&
+      Number.isFinite(amt) &&
+      amt >= MIN_BET &&
+      amt <= MAX_BET &&
+      amt <= g.state.money + 1e-9;
+    btn?.classList.toggle("hidden", !ok);
+    if (err) {
+      if (!raw || ok) err.textContent = "";
+      else if (this.selected < 0) err.textContent = "Tap a horse first.";
+      else if (!Number.isFinite(amt) || amt < MIN_BET) err.textContent = `Minimum is ${CURRENCY}${MIN_BET}.`;
+      else if (amt > MAX_BET) err.textContent = `Maximum is ${CURRENCY}${MAX_BET}.`;
+      else err.textContent = "Not enough load.";
+    }
+  }
+
+  private confirmCustom(): void {
+    const raw = el<HTMLInputElement>("bet-amt")?.value.trim() ?? "";
+    const amt = Number(raw);
+    if (this.selected < 0) return;
+    if (!this.place(this.selected, amt)) return;
+    const input = el<HTMLInputElement>("bet-amt");
+    if (input) input.value = "";
+    this.refreshBar();
+  }
+
+  /** Deduct `amount` from the signed-in load and record a win bet on `trap`. */
+  private place(trap: number, amount: number): boolean {
+    const g = this.game;
+    const amt = Math.round(amount * 100) / 100;
+    if (this.selected < 0) this.selected = trap;
+    if (!Number.isFinite(amt) || amt < MIN_BET) {
+      this.warn = `Minimum bet is ${CURRENCY}${MIN_BET}.`;
+      return false;
+    }
+    if (amt > MAX_BET || g.state.cellAmount("win", trap) + amt > MAX_BET) {
+      this.warn = `Maximum bet on one horse is ${CURRENCY}${MAX_BET}.`;
+      return false;
+    }
+    if (amt > g.state.money + 1e-9) {
+      this.warn = "Not enough load.";
+      return false;
+    }
+    const ok = g.state.stake("win", trap, amt);
+    if (!ok) {
+      this.warn = "Not enough load.";
+      return false;
+    }
+    g.net.placeBet("win", trap, -1, amt);
+    g.sound.chip();
+    this.selected = trap;
+    this.refreshBar();
+    return true;
+  }
+
+  private corners(ctx: CanvasRenderingContext2D): void {
+    const g = this.game;
+    const B = g.buttons;
+    const mk = (x: number, kind: "fs" | "au" | "x") => {
+      const b = {
+        x, y: 18, w: 48, h: 48,
+        onTap: () => {
+          g.sound.click();
+          if (kind === "fs") g.fullscreen(!document.fullscreenElement);
+          else if (kind === "au") {
+            g.sound.setMuted(!g.sound.muted);
+            g.state.muted = g.sound.muted;
+          } else g.show(new MenuScreen(g));
+        },
+      };
+      B.add(b);
+      ctx.fillStyle = "rgba(6,15,36,0.72)";
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      const label = kind === "fs" ? "FS" : kind === "au" ? (g.sound.muted ? "OFF" : "ON") : "X";
+      text(ctx, label, b.x + 24, b.y + 24, { font: FONT_IMPACT, size: 18, color: "#ffffff" });
+    };
+    mk(1088, "fs");
+    mk(1144, "au");
+    mk(1200, "x");
+  }
+
+  private drawCard(ctx: CanvasRenderingContext2D, card: Card): void {
+    const g = this.game;
+    const A = g.assets;
+    const trap = card.trap;
+    const on = this.selected === trap;
+    const staked = g.state.cellAmount("win", trap);
+    ctx.save();
+    ctx.fillStyle = on ? "rgba(242,194,0,0.18)" : "rgba(6,16,40,0.78)";
+    ctx.strokeStyle = on ? "#ffe14d" : "#2b4d86";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(card.x, card.y, card.w, card.h, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    const hs = A.img(`horse_${trap + 1}_a`);
+    const [fx, fy, fw, fh] = HORSE_A_FRAMES[trap + 1][THUMB_FRAME];
+    const th = 78;
+    const tw = (th / fh) * fw;
+    ctx.drawImage(hs, fx, fy, fw, fh, card.x + 8, card.y + 8, tw, th);
+    const sx = (trap % 4) * 72;
+    const sy = Math.floor(trap / 4) * 72;
+    ctx.drawImage(A.img("bibs"), sx, sy, 72, 72, card.x + 12, card.y + 78, 32, 32);
+    text(ctx, `${trap + 1}  ${TRAPS[trap].name}`, card.x + 150, card.y + 36, {
+      font: FONT_MOTOR, size: 18, color: "#ffffff", align: "left",
+    });
+    const price = g.state.odds.win[trap];
+    text(ctx, `PAYS x${price.toFixed(2)}`, card.x + 150, card.y + 64, {
+      font: FONT_DIGI, size: 18, color: "#9fd0ff", align: "left",
+    });
+    text(ctx, staked > 0 ? `BET ${fmtMoney(staked)}` : "NO BET", card.x + 150, card.y + 92, {
+      font: FONT_IMPACT, size: 18, color: staked > 0 ? "#ffe14d" : "#6d88b0", align: "left",
+    });
+
+    QUICK.forEach((v, i) => {
+      const bx = card.x + card.w - 196 + i * 94;
+      const by = card.y + 32;
+      const can = g.state.money + 1e-9 >= v && staked + v <= MAX_BET;
+      const b = { x: bx, y: by, w: 86, h: 58, onTap: () => { if (!this.place(trap, v)) return; } };
+      g.buttons.add(b);
+      ctx.fillStyle = can ? "#f2c200" : "#3a4258";
+      ctx.beginPath();
+      ctx.roundRect(bx, by, 86, 58, 8);
+      ctx.fill();
+      text(ctx, String(v), bx + 43, by + 30, {
+        font: FONT_IMPACT, size: 26, color: can ? "#1a1a1a" : "#9aa4b8",
+      });
+    });
+
+    g.buttons.add({
+      x: card.x, y: card.y, w: card.w - 200, h: card.h,
+      onTap: () => {
+        g.sound.click();
+        this.selected = trap;
+        this.refreshBar();
+      },
+    });
+    ctx.restore();
+  }
+
+  render(ctx: CanvasRenderingContext2D): void {
+    const g = this.game;
+    const A = g.assets;
+    ctx.drawImage(A.img("bg_bet_panel"), 0, 0, 1280, 876);
+    ctx.fillStyle = "rgba(2,8,23,0.35)";
+    ctx.fillRect(0, 0, 1280, 876);
+
+    g.buttons.clear();
+    text(ctx, "BETTING WINDOW", 36, 42, { font: FONT_IMPACT, size: 36, color: "#ffffff", align: "left" });
+    text(ctx, `LOAD ${fmtMoney(g.state.money)}`, 36, 78, {
+      font: FONT_DIGI, size: 26, color: "#ffe14d", align: "left",
+    });
+    if (this.locking) {
+      const s = Math.max(0, Math.ceil(this.lock));
+      const label = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+      text(ctx, `RACE IN ${label}`, 760, 58, { font: FONT_DIGI, size: 28, color: "#ffe14d" });
+    } else if (g.state.bets.length > 0) {
+      text(ctx, "WAITING FOR ANOTHER HORSE", 700, 58, {
+        font: FONT_DIGI, size: 22, color: "#9fd0ff",
+      });
+    } else {
+      text(ctx, "BET 2 HORSES TO START", 700, 58, {
+        font: FONT_DIGI, size: 22, color: "#9fd0ff",
+      });
+    }
+
+    const clear = {
+      x: 900, y: 28, w: 160, h: 40,
+      onTap: () => {
+        if (g.state.totalBet <= 0) return;
+        g.sound.click();
+        g.state.clearBets();
+        g.net.clearBets();
+        this.locking = false;
+        this.lock = 0;
+        this.refreshBar();
+      },
+    };
+    g.buttons.add(clear);
+    ctx.fillStyle = "#14284d";
+    ctx.beginPath();
+    ctx.roundRect(clear.x, clear.y, clear.w, clear.h, 8);
+    ctx.fill();
+    text(ctx, "CLEAR BET", clear.x + 80, clear.y + 20, { font: FONT_IMPACT, size: 20, color: "#ffffff" });
+
+    for (const card of cards()) this.drawCard(ctx, card);
+    this.corners(ctx);
+    this.refreshBar();
+
+    if (this.warn) {
+      const w = this.warn;
+      renderMsgDialog(ctx, g, g.buttons, w, () => { this.warn = null; });
+    }
+  }
+
+  pointerDown(): void {}
+  pointerUp(): void {}
+}

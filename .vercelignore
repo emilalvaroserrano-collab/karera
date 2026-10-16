@@ -1,0 +1,9 @@
+node_modules
+karera/node_modules
+karera/server/node_modules
+bg_realistic
+bg_src
+attachments
+artifacts
+screenshots
+.vercel
